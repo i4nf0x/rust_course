@@ -7,7 +7,7 @@ use std::error::Error;
 
 fn print_usage_and_exit() {
     eprintln!("Missing an argument.");
-    eprintln!("Usage: transform lowercase|uppercase|no-spaces|slugify");
+    eprintln!("Usage: transform lowercase|uppercase|no-spaces|slugify|csv");
 
     exit(1);
 }
@@ -68,7 +68,9 @@ struct CsvTable {
 
 impl CsvTable {
     fn new(headers: Vec<String>) -> CsvTable {
-        CsvTable{headers: headers.clone(), records: Vec::new(), col_lens: headers.iter().map(|f| f.len()).collect()}
+        CsvTable{headers: headers.clone(), 
+                 records: Vec::new(), 
+                 col_lens: headers.iter().map(|f| f.len()).collect()}
     }
 
     fn append(&mut self, record: Vec<String>) -> Result<(), Box<dyn Error>> {
@@ -93,7 +95,7 @@ impl Display for CsvTable {
 
         let format_table_line = |record: &Vec<String>| {
             format!("| {} |", record.iter().enumerate().map(|(i,s)| {
-                format!("{:>width$}", s, width=self.col_lens[i].clone())
+                format!("{:>width$}", s, width=self.col_lens[i])
             }).collect::<Vec<String>>().join(" | "))
         };
 
