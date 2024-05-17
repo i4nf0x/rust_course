@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt::Display;
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::Read;
 use std::path::Path;
 
 pub fn render_csv<R: Read>(input: R) -> Result<String, Box<dyn Error>> {
@@ -20,9 +20,8 @@ pub fn render_csv<R: Read>(input: R) -> Result<String, Box<dyn Error>> {
 }
 
 pub fn render_file(path: &Path) -> Result<String, Box<dyn Error>> {
-    let input = fs::read_to_string(path)?;
     let file = fs::File::open(path)?;
-    render_csv(Cursor::new(input))
+    render_csv(file)
 }
 
 struct CsvTable {
