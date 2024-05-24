@@ -7,6 +7,7 @@ use std::process::exit;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::rc::Rc;
+use clap::Parser;
 
 use chat::ChatMessage;
 
@@ -119,8 +120,8 @@ fn handle_client(clients: ClientsTable, stream: Result<TcpStream, std::io::Error
 }
 
 
-fn listen(address: &str) {
-    match  TcpListener::bind(address) {
+fn listen(address: &str, port: u16) {
+    match  TcpListener::bind((address, port) ) {
         Ok(listener) => {
             let clients = ClientsTable::new();
             
@@ -137,7 +138,19 @@ fn listen(address: &str) {
     } 
 }
 
-fn main() { 
-    listen("127.0.0.1:11111")
-     
+/// Simple chat server
+#[derive(Parser,Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// address to bind
+    #[arg(short,long,default_value = "127.0.0.1")]
+    address: String,
+    /// port to bind
+    #[arg(short,long, default_value_t = 11111)]
+    port: u16,
+}
+
+fn main() {
+    let args = Args::parse(); 
+    listen(&args.address, args.port);
 }
