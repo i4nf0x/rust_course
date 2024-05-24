@@ -1,7 +1,7 @@
 use chat::{ChatMessage, ChatMessageContent};
-use std::f32::consts::E;
+
 use std::ffi::OsStr;
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 use std::process::exit;
@@ -9,6 +9,7 @@ use std::thread;
 use clap::Parser;
 use std::fs::File;
 use std::error::Error;
+use image::io::Reader as ImageReader;
 
 
 struct ChatContext<'a> {
@@ -41,7 +42,7 @@ fn save_received_file(dir_path: &str, data: Vec<u8>, filename: Option<String>) -
             Ok(mut file) => {
                 if let Err(e) = file.write_all(&data) {
                     eprintln!("Error: Could not write to {:?}\n{e}", &filepath);    
-                    return None
+                    None
                 } else {
                     return Some(filepath.to_string_lossy().to_string());
                 }
@@ -64,12 +65,13 @@ fn incoming_loop(mut stream: TcpStream) {
                         println!("[{sender}] {text}");
                     },
                     ChatMessageContent::Image(data) => {
-                        println!("[{sender}] sent an image");
+                        println!("[{sender}] sending an image");
                         if let Some(file) = save_received_file("images", data, None) {
                             println!("Image saved to {}", file);
                         }
                     },
                     ChatMessageContent::File(filename, data) => {
+                        println!("[{sender}] sending a file");
                         if let Some(file) = save_received_file("files", data, Some(filename)) {
                             println!("File saved to {}", file);
                         }
@@ -92,37 +94,58 @@ fn cmd_quit() {
     exit(0);
 }
 
-fn read_file_to_vec(filename: &str) -> Result<Vec<u8>,Box<dyn Error>> {
+
+fn send_message(context: &mut ChatContext, message: ChatMessage) {
+    if message.write_to(&mut context.stream).is_err() {
+        eprintln!("Failed to send a message.");
+        exit(1);
+    }
+}
+
+fn read_image_data(filename: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    let extension = Path::new(filename).extension().and_then(OsStr::to_str);
+    match extension {
+        Some(".png") | Some(".PNG") => {
+            read_file_data(filename)
+        },
+        _ => {
+            let img = ImageReader::open(filename)?.decode()?;
+            let mut data = Vec::<u8>::new();
+            img.write_to(&mut Cursor::new(&mut data), image::ImageFormat::Png)?;
+            Ok(data)
+        }
+    }
+}
+
+fn read_file_data(filename: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut file = File::open(filename)?;
     let mut buf = Vec::<u8>::new();
     file.read_to_end(&mut buf)?;
     Ok(buf)
 }
 
-fn send_message(context: &mut ChatContext, message: ChatMessage) {
-    if let Err(_) = message.write_to(&mut context.stream) {
-        eprintln!("Failed to send a message.");
-        exit(1);
-    }
-}
-
-
 fn cmd_send_file_image(context: &mut ChatContext, filename: &str, is_image: bool) {
-    match read_file_to_vec(filename) {
+    let data = if is_image {
+        read_image_data(filename)
+    } else {
+        read_file_data(filename)
+    };
+
+    match data {
         Ok(data) => {
             let nickname = context.nickname.to_string();
-            let message;
-            if is_image {
-                message = ChatMessage {
+            let message = if is_image {
+                ChatMessage {
                     sender: nickname,
                     content: ChatMessageContent::Image(data)
-                };
+                }
             } else {
-                message = ChatMessage {
+                ChatMessage {
                     sender: nickname,
                     content: ChatMessageContent::File(basename(filename), data)
-                };
-            }
+                }
+            };
+
             send_message(context, message);
 
             if is_image {

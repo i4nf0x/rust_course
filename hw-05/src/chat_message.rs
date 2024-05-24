@@ -28,18 +28,18 @@ impl ChatMessage {
     pub fn read_from(stream: &mut dyn Read) -> Result<ChatMessage, MessageError> {
         let mut msg_len = [0u8; 4];
         
-        if let Err(_) = stream.read_exact(&mut msg_len) {
+        if stream.read_exact(&mut msg_len).is_err() {
             return Err(MessageError::IOError);
         }
 
         let msg_len = u32::from_le_bytes(msg_len);
 
         let mut buf: Vec<u8> = vec![0u8;msg_len as usize];
-        if let Err(_) = stream.read_exact(&mut buf) {
+        if stream.read_exact(&mut buf).is_err() {
             return Err(MessageError::IOError);
         }
 
-        match serde_json::from_slice::<ChatMessage>(&buf) {
+        match serde_cbor::from_slice::<ChatMessage>(&buf) {
             Ok(message) => Ok(message),
             Err(e) => {
                 if e.is_io() || e.is_eof() {
@@ -52,21 +52,21 @@ impl ChatMessage {
     }
 
     pub fn write_to(&self, stream: &mut dyn Write) -> Result<(), MessageError> {
-        match serde_json::to_vec(&self) {
+        match serde_cbor::to_vec(&self) {
             Ok(data) => {
                 let len = (data.len() as u32 ).to_le_bytes();
-                if let Err(_) = stream.write(&len) {
+                if stream.write(&len).is_err() {
                     return Err(MessageError::IOError);
                 }
 
-                if let Err(_) = stream.write_all(&data) {
+                if stream.write_all(&data).is_err() {
                     return Err(MessageError::IOError);
                 }
 
-                return Ok(())
+                Ok(())
             },
             Err(_) => {
-                return Err(MessageError::MalformedMessage)
+                Err(MessageError::MalformedMessage)
             }
         }
     }

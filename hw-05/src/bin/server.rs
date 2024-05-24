@@ -96,13 +96,11 @@ fn receive_messages(mut clients: ClientsTable, mut stream: TcpStream)  -> EmptyR
             }
             Err(chat::MessageError::IOError) => { 
                 clients.remove_client(addr)?;
-                return Err(ServerError::BrokenStream)?; 
+                Err(ServerError::BrokenStream)?; 
             },
             Err(chat::MessageError::MalformedMessage) => { eprintln!("Received a malformed message from {addr}."); }
         }
     }
-
-    return Ok(());
 }
 
 fn handle_client(clients: ClientsTable, stream: Result<TcpStream, std::io::Error>) {
