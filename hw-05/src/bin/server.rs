@@ -3,13 +3,12 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read, Write};
 use std::net::{TcpStream,SocketAddr,TcpListener};
 use std::ops::DerefMut;
+use std::process::exit;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::rc::Rc;
 
 use chat::ChatMessage;
-
-
 
 
 #[derive(Debug,thiserror::Error)]
@@ -21,59 +20,84 @@ pub enum ServerError {
 }
 
 type EmptyResult = Result<(), Box<dyn Error>>;
-type ClientsTable = Arc<Mutex<HashMap<SocketAddr, TcpStream>>>;
 
-fn broadcast_message(author: SocketAddr, clients: ClientsTable, message: &ChatMessage) -> EmptyResult {
-    match clients.lock() {
-        Ok(mut clients)  =>{
-            let mut failed = Vec::<SocketAddr>::new();
-            let data: Vec<u8>  = serde_json::to_vec(message)?;
+#[derive(Clone)]
+struct ClientsTable {
+    pub table: Arc<Mutex<HashMap<SocketAddr, TcpStream>>>
+}
 
-            clients.retain(|addr, stream| {  
-                if *addr == author {
-                    return true;
-                }  
-                match stream.write_all(&data) {
-                    Ok(_) => true,
-                    Err(e) => {
-                        eprintln!("Write to client {addr} failed, disconnecting.");
-                        false
-                    },
-                }
-            });
-        }
-        Err(_) => {
-            return Err(ServerError::MutexPoisoned)?;
+impl ClientsTable {
+    pub fn new() -> ClientsTable {
+        ClientsTable {
+            table: Arc::new(Mutex::new(HashMap::<SocketAddr, TcpStream>::new()))
         }
     }
-    Ok(())
+    pub fn add_client(&mut self, addr: SocketAddr, stream: &TcpStream) -> EmptyResult {
+        match self.table.lock() {
+            Ok(mut clients) => { 
+                clients.insert(addr, stream.try_clone()?); 
+                eprintln!("Client {addr} connected.");
+            },
+            Err(_) => { return Err(ServerError::MutexPoisoned)?; }
+        }
+        Ok(())
+    }
+
+    pub fn remove_client(&mut self, addr: SocketAddr) -> EmptyResult {
+        match self.table.lock() {
+            Ok(mut clients) => { 
+                clients.remove(&addr); 
+                eprintln!("Client {addr} disconnected.");
+            },
+            Err(_) => { return Err(ServerError::MutexPoisoned)?; }
+        }
+        Ok(())
+    }
+
+    pub fn for_each<F: FnMut(&SocketAddr, &mut TcpStream) -> bool>(&mut self, callback: F) -> EmptyResult {
+        match self.table.lock() {
+            Ok(mut clients) => { 
+                clients.retain(callback);
+            },
+            Err(_) => { return Err(ServerError::MutexPoisoned)?; }
+        }
+        Ok(())
+    }
 }
 
 
-fn receive_messages(clients: ClientsTable, mut stream: TcpStream)  -> EmptyResult {
-    let addr = stream.peer_addr()?;
 
-    match clients.lock() {
-        Ok(mut clients) => {
-            clients.insert(addr, stream.try_clone()?);
+fn broadcast_message(author: SocketAddr, clients: &mut ClientsTable, message: &ChatMessage) -> EmptyResult {
+    clients.for_each(|addr, stream| {  
+        if *addr == author {
+            return true;
         }
-        Err(_) => {
-            return Err(ServerError::MutexPoisoned)?;
+        match message.write_to(stream) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("Write to client {addr} failed, disconnecting.");
+                false
+            },
         }
-    }
+    })?;
+
+    Ok(())
+}
+
+fn receive_messages(mut clients: ClientsTable, mut stream: TcpStream)  -> EmptyResult {
+    let addr = stream.peer_addr()?;
+    clients.add_client(addr, &stream)?;
 
     loop {
-        match ChatMessage::read(&mut stream) {
-            Ok(message) => {
-                broadcast_message(addr, Arc::clone(&clients), &message)?;
+        match ChatMessage::read_from(&mut stream) {
+            Ok(message) => { 
+                broadcast_message(addr, &mut clients, &message)?; 
             }
-            Err(chat::MessageError::IOError) => {
-                eprintln!("Error reading form socket {addr}, dropping connection.");
-                break;
+            Err(chat::MessageError::IOError) => { 
+                clients.remove_client(addr)?;
+                return Err(ServerError::BrokenStream)?; 
             },
-            Err(chat::MessageError::MalformedMessage) => {
-                eprintln!("Received a malformed message from {addr}.");
-            }
+            Err(chat::MessageError::MalformedMessage) => { eprintln!("Received a malformed message from {addr}."); }
         }
     }
 
@@ -98,17 +122,17 @@ fn handle_client(clients: ClientsTable, stream: Result<TcpStream, std::io::Error
 fn listen(address: &str) {
     match  TcpListener::bind(address) {
         Ok(listener) => {
-            let clients: HashMap<SocketAddr, TcpStream> = HashMap::new();
-            let clients = Arc::new(Mutex::new(clients));
-        
+            let clients = ClientsTable::new();
+            
             eprintln!("Ok: listening for connections on {address}");
             for stream in listener.incoming() {
-                let clients = Arc::clone(&clients);
+                let clients = clients.clone();
                 thread::spawn(move || handle_client(clients, stream)) ;
             }
         },
         Err(e) => {
             eprintln!("Error while listening: {e}");
+            exit(1);
         }
     } 
 }

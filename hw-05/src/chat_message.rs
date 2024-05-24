@@ -1,11 +1,15 @@
-use std::net::TcpStream;
-use std::io::Read;
-use std::error::Error;
+use std::io::{Read,Write};
 
 use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize, Debug)]
-pub enum ChatMessage {
+pub struct ChatMessage {
+    pub sender: String,
+    pub content: ChatMessageContent
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ChatMessageContent {
     Text(String),
     Image(Vec<u8>),
     File(String, Vec<u8>),  // Filename and its content as bytes
@@ -13,14 +17,15 @@ pub enum ChatMessage {
 
 #[derive(Debug,thiserror::Error)]
 pub enum MessageError {
-    #[error("Socked closed")]
+    #[error("Socked error")]
     IOError,
     #[error("Malformed message")]
-    MalformedMessage
+    MalformedMessage,
 }
 
 impl ChatMessage {
-    pub fn read(stream: &mut dyn Read) -> Result<ChatMessage, MessageError> {
+
+    pub fn read_from(stream: &mut dyn Read) -> Result<ChatMessage, MessageError> {
         let mut msg_len = [0u8; 4];
         
         if let Err(_) = stream.read_exact(&mut msg_len) {
@@ -29,7 +34,7 @@ impl ChatMessage {
 
         let msg_len = u32::from_le_bytes(msg_len);
 
-        let mut buf: Vec<u8> = Vec::with_capacity(msg_len as usize);
+        let mut buf: Vec<u8> = vec![0u8;msg_len as usize];
         if let Err(_) = stream.read_exact(&mut buf) {
             return Err(MessageError::IOError);
         }
@@ -44,6 +49,25 @@ impl ChatMessage {
                 }
             }
         }
+    }
 
+    pub fn write_to(&self, stream: &mut dyn Write) -> Result<(), MessageError> {
+        match serde_json::to_vec(&self) {
+            Ok(data) => {
+                let len = (data.len() as u32 ).to_le_bytes();
+                if let Err(_) = stream.write(&len) {
+                    return Err(MessageError::IOError);
+                }
+
+                if let Err(_) = stream.write_all(&data) {
+                    return Err(MessageError::IOError);
+                }
+
+                return Ok(())
+            },
+            Err(_) => {
+                return Err(MessageError::MalformedMessage)
+            }
+        }
     }
 }
