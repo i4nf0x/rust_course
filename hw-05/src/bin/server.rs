@@ -1,12 +1,12 @@
 use std::error::Error;
-use std::collections::{HashMap, HashSet};
-use std::io::{Cursor, Read, Write};
+use std::collections::{HashMap};
+
 use std::net::{TcpStream,SocketAddr,TcpListener};
-use std::ops::DerefMut;
+
 use std::process::exit;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::rc::Rc;
+
 use clap::Parser;
 
 use chat::ChatMessage;
@@ -75,7 +75,7 @@ fn broadcast_message(author: SocketAddr, clients: &mut ClientsTable, message: &C
         }
         match message.write_to(stream) {
             Ok(_) => true,
-            Err(e) => {
+            Err(_e) => {
                 eprintln!("Write to client {addr} failed, disconnecting.");
                 false
             },
