@@ -102,27 +102,6 @@ fn send_message(context: &mut ChatContext, message: ChatMessage) {
     }
 }
 
-fn read_image_data(filename: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    let extension = Path::new(filename).extension().and_then(OsStr::to_str);
-    match extension {
-        Some(".png") | Some(".PNG") => {
-            read_file_data(filename)
-        },
-        _ => {
-            let img = ImageReader::open(filename)?.decode()?;
-            let mut data = Vec::<u8>::new();
-            img.write_to(&mut Cursor::new(&mut data), image::ImageFormat::Png)?;
-            Ok(data)
-        }
-    }
-}
-
-fn read_file_data(filename: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    let mut file = File::open(filename)?;
-    let mut buf = Vec::<u8>::new();
-    file.read_to_end(&mut buf)?;
-    Ok(buf)
-}
 
 fn cmd_send_file_image(context: &mut ChatContext, filename: &str, is_image: bool) {
     let data = if is_image {
@@ -159,6 +138,28 @@ fn cmd_send_file_image(context: &mut ChatContext, filename: &str, is_image: bool
             println!("Could not read file \"{filename}\"\n{e}");
         }
     }
+}
+
+fn read_image_data(filename: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    let extension = Path::new(filename).extension().and_then(OsStr::to_str);
+    match extension {
+        Some(".png") | Some(".PNG") => {
+            read_file_data(filename)
+        },
+        _ => {
+            let img = ImageReader::open(filename)?.decode()?;
+            let mut data = Vec::<u8>::new();
+            img.write_to(&mut Cursor::new(&mut data), image::ImageFormat::Png)?;
+            Ok(data)
+        }
+    }
+}
+
+fn read_file_data(filename: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut file = File::open(filename)?;
+    let mut buf = Vec::<u8>::new();
+    file.read_to_end(&mut buf)?;
+    Ok(buf)
 }
 
 
@@ -202,6 +203,11 @@ fn keyboard_loop(context: &mut ChatContext) {
     }
 }
 
+/// Main function of the client. Connects to the server and starts the keyboard_loop 
+/// which reads text commands.
+/// 
+/// Two threads are spawned, the background thread that runs the incoming loop which
+/// processes incoming messages and the keyboard_loop which reads the keyboard input from the users
 fn start_client(address: &str, port: u16, nickname: &str) {
     match TcpStream::connect((address, port) ) {
         Ok(mut stream) => {
@@ -237,4 +243,5 @@ fn main() {
     let args = Args::parse();
 
     start_client(&args.address, args.port, &args.nickname);
+    
 }

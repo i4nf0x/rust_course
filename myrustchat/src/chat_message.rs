@@ -2,12 +2,16 @@ use std::io::{Read,Write};
 
 use serde::{Serialize, Deserialize};
 
+
+/// Represents a chat message which consists of a sender nickname and content
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ChatMessage {
     pub sender: String,
     pub content: ChatMessageContent
 }
 
+/// Represents a chat message content which can be a plaintext, Image (encoded as PNG)
+/// or a file (with a filename)
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ChatMessageContent {
     Text(String),
@@ -22,6 +26,7 @@ pub enum MessageError {
     #[error("Malformed message")]
     MalformedMessage,
 }
+
 
 impl ChatMessage {
 

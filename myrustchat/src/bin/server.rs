@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use clap::Parser;
+use log;
 
 use chat::ChatMessage;
 
@@ -27,6 +28,7 @@ struct ClientsTable {
     pub table: Arc<Mutex<HashMap<SocketAddr, TcpStream>>>
 }
 
+/// Represents a hash table that's shared among client threads
 impl ClientsTable {
     pub fn new() -> ClientsTable {
         ClientsTable {
@@ -37,7 +39,7 @@ impl ClientsTable {
         match self.table.lock() {
             Ok(mut clients) => { 
                 clients.insert(addr, stream.try_clone()?); 
-                eprintln!("Client {addr} connected.");
+                log::info!("Client {addr} connected.");
             },
             Err(_) => { return Err(ServerError::MutexPoisoned)?; }
         }
@@ -48,7 +50,7 @@ impl ClientsTable {
         match self.table.lock() {
             Ok(mut clients) => { 
                 clients.remove(&addr); 
-                eprintln!("Client {addr} disconnected.");
+                log::info!("Client {addr} disconnected.");
             },
             Err(_) => { return Err(ServerError::MutexPoisoned)?; }
         }
@@ -67,7 +69,7 @@ impl ClientsTable {
 }
 
 
-
+/// Broadcasts a chat message to all connected clients except the author.
 fn broadcast_message(author: SocketAddr, clients: &mut ClientsTable, message: &ChatMessage) -> EmptyResult {
     clients.for_each(|addr, stream| {  
         if *addr == author {
@@ -76,7 +78,7 @@ fn broadcast_message(author: SocketAddr, clients: &mut ClientsTable, message: &C
         match message.write_to(stream) {
             Ok(_) => true,
             Err(_e) => {
-                eprintln!("Write to client {addr} failed, disconnecting.");
+                log::warn!("Write to client {addr} failed, disconnecting.");
                 false
             },
         }
@@ -85,6 +87,7 @@ fn broadcast_message(author: SocketAddr, clients: &mut ClientsTable, message: &C
     Ok(())
 }
 
+/// Receives messages from a client and broadcasts them to other clients.
 fn receive_messages(mut clients: ClientsTable, mut stream: TcpStream)  -> EmptyResult {
     let addr = stream.peer_addr()?;
     clients.add_client(addr, &stream)?;
@@ -98,39 +101,40 @@ fn receive_messages(mut clients: ClientsTable, mut stream: TcpStream)  -> EmptyR
                 clients.remove_client(addr)?;
                 Err(ServerError::BrokenStream)?; 
             },
-            Err(chat::MessageError::MalformedMessage) => { eprintln!("Received a malformed message from {addr}."); }
+            Err(chat::MessageError::MalformedMessage) => { log::warn!("Received a malformed message from {addr}."); }
         }
     }
 }
 
+/// Handle incoming connection errors and pass control to receive_messages
 fn handle_client(clients: ClientsTable, stream: Result<TcpStream, std::io::Error>) {
     match stream {
         Ok(stream) => {
             if let Err(e) = receive_messages(clients, stream) {
-                eprintln!("Client connection error: {e}");
+                log::warn!("Client connection error: {e}");
             }
         },
 
         Err(e) => {
-            eprintln!("Failed to handle a connection: {e}");
+            log::warn!("Failed to handle a connection: {e}");
         }
     };
 }
 
-
-fn listen(address: &str, port: u16) {
+/// Main server function. Listens for incoming connections and spawns a new thread to handle each connection.
+fn start_server(address: &str, port: u16) {
     match  TcpListener::bind((address, port) ) {
         Ok(listener) => {
             let clients = ClientsTable::new();
             
-            eprintln!("Ok: listening for connections on {address}");
+            log::info!("Ok: listening for connections on {address}");
             for stream in listener.incoming() {
                 let clients = clients.clone();
                 thread::spawn(move || handle_client(clients, stream)) ;
             }
         },
         Err(e) => {
-            eprintln!("Error while listening: {e}");
+            log::error!("Couldn't bind to {e}");
             exit(1);
         }
     } 
@@ -149,6 +153,7 @@ struct Args {
 }
 
 fn main() {
+    simple_logger::init().unwrap();
     let args = Args::parse(); 
-    listen(&args.address, args.port);
+    start_server(&args.address, args.port);
 }
