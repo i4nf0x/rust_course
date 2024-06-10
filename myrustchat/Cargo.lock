@@ -662,9 +662,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "mychat"
-version = "0.1.1"
+name = "myrustchat"
+version = "0.1.2"
 dependencies = [
+ "anyhow",
  "chrono",
  "clap",
  "image",

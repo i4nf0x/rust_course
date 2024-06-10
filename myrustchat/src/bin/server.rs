@@ -1,4 +1,4 @@
-use std::error::Error;
+use anyhow::{Result,Context};
 use std::collections::{HashMap};
 
 use std::net::{TcpStream,SocketAddr,TcpListener};
@@ -11,17 +11,16 @@ use clap::Parser;
 use log;
 
 use chat::ChatMessage;
+use chat::EmptyResult;
 
 
 #[derive(Debug,thiserror::Error)]
 pub enum ServerError {
-    #[error("Mutex poisoned.")]
+    #[error("Server error: Mutex poisoned.")]
     MutexPoisoned,
-    #[error("Stream is broken")]
+    #[error("Client error: Stream is broken")]
     BrokenStream
 }
-
-type EmptyResult = Result<(), Box<dyn Error>>;
 
 #[derive(Clone)]
 struct ClientsTable {
@@ -35,35 +34,28 @@ impl ClientsTable {
             table: Arc::new(Mutex::new(HashMap::<SocketAddr, TcpStream>::new()))
         }
     }
+
     pub fn add_client(&mut self, addr: SocketAddr, stream: &TcpStream) -> EmptyResult {
-        match self.table.lock() {
-            Ok(mut clients) => { 
-                clients.insert(addr, stream.try_clone()?); 
-                log::info!("Client {addr} connected.");
-            },
-            Err(_) => { return Err(ServerError::MutexPoisoned)?; }
-        }
+        let mut clients = self.table.lock()
+            .map_err(|_| ServerError::MutexPoisoned)?;
+        clients.insert(addr, stream.try_clone()?); 
+        log::info!("Client {addr} connected.");
         Ok(())
     }
 
     pub fn remove_client(&mut self, addr: SocketAddr) -> EmptyResult {
-        match self.table.lock() {
-            Ok(mut clients) => { 
-                clients.remove(&addr); 
-                log::info!("Client {addr} disconnected.");
-            },
-            Err(_) => { return Err(ServerError::MutexPoisoned)?; }
-        }
+        let mut clients = self.table.lock()
+            .map_err(|_| ServerError::MutexPoisoned)?;
+        
+        clients.remove(&addr); 
+        log::info!("Client {addr} disconnected.");
         Ok(())
     }
 
     pub fn for_each<F: FnMut(&SocketAddr, &mut TcpStream) -> bool>(&mut self, callback: F) -> EmptyResult {
-        match self.table.lock() {
-            Ok(mut clients) => { 
-                clients.retain(callback);
-            },
-            Err(_) => { return Err(ServerError::MutexPoisoned)?; }
-        }
+        let mut clients = self.table.lock()
+            .map_err(|_| ServerError::MutexPoisoned)?;
+        clients.retain(callback);    
         Ok(())
     }
 }
@@ -71,16 +63,19 @@ impl ClientsTable {
 
 /// Broadcasts a chat message to all connected clients except the author.
 fn broadcast_message(author: SocketAddr, clients: &mut ClientsTable, message: &ChatMessage) -> EmptyResult {
+    log::debug!("Broadcasting a message from {author}");
     clients.for_each(|addr, stream| {  
         if *addr == author {
             return true;
         }
-        match message.write_to(stream) {
-            Ok(_) => true,
-            Err(_e) => {
-                log::warn!("Write to client {addr} failed, disconnecting.");
-                false
-            },
+
+        log::debug!("Forwarding the message to {addr}.");
+
+        if let Ok(_) = message.write_to(stream) {
+            true
+        } else {
+            log::warn!("Write to client {addr} failed.");
+            false
         }
     })?;
 
@@ -88,7 +83,8 @@ fn broadcast_message(author: SocketAddr, clients: &mut ClientsTable, message: &C
 }
 
 /// Receives messages from a client and broadcasts them to other clients.
-fn receive_messages(mut clients: ClientsTable, mut stream: TcpStream)  -> EmptyResult {
+fn receive_messages(mut clients: ClientsTable, stream: Result<TcpStream, std::io::Error>)  -> EmptyResult {
+    let mut stream = stream.context("Failed to establish communication with a client.")?;
     let addr = stream.peer_addr()?;
     clients.add_client(addr, &stream)?;
 
@@ -101,43 +97,43 @@ fn receive_messages(mut clients: ClientsTable, mut stream: TcpStream)  -> EmptyR
                 clients.remove_client(addr)?;
                 Err(ServerError::BrokenStream)?; 
             },
-            Err(chat::MessageError::MalformedMessage) => { log::warn!("Received a malformed message from {addr}."); }
+            Err(chat::MessageError::MalformedMessage) => { 
+                log::warn!("Received a malformed message from {addr}."); 
+            }
         }
     }
 }
 
 /// Handle incoming connection errors and pass control to receive_messages
 fn handle_client(clients: ClientsTable, stream: Result<TcpStream, std::io::Error>) {
-    match stream {
-        Ok(stream) => {
-            if let Err(e) = receive_messages(clients, stream) {
-                log::warn!("Client connection error: {e}");
-            }
-        },
+    log::info!("Client thread started.");
 
-        Err(e) => {
-            log::warn!("Failed to handle a connection: {e}");
+    if let Err(e) = receive_messages(clients, stream) {
+        if let Some(ServerError::BrokenStream) = e.downcast_ref::<ServerError>() {
+            log::warn!("Connection with client terminated.");
+            log::warn!("{e}");
+        } else {
+            log::error!("{e}");
         }
-    };
+        
+    }
+    log::info!("Client thread terminated.");
 }
 
 /// Main server function. Listens for incoming connections and spawns a new thread to handle each connection.
-fn start_server(address: &str, port: u16) {
-    match  TcpListener::bind((address, port) ) {
-        Ok(listener) => {
-            let clients = ClientsTable::new();
-            
-            log::info!("Ok: listening for connections on {address}");
-            for stream in listener.incoming() {
-                let clients = clients.clone();
-                thread::spawn(move || handle_client(clients, stream)) ;
-            }
-        },
-        Err(e) => {
-            log::error!("Couldn't bind to {e}");
-            exit(1);
-        }
-    } 
+fn start_server(address: &str, port: u16) -> EmptyResult {
+    let listener = TcpListener::bind((address, port))
+        .with_context(|| format!("Could not bind {address}:{port}."))?;
+
+    let clients = ClientsTable::new();
+
+    log::info!("Ok: listening for connections on {address}:{port}");
+    for stream in listener.incoming() {
+        let clients = clients.clone();
+        thread::spawn(move || handle_client(clients, stream)) ;
+    }
+
+    unreachable!();
 }
 
 /// Simple chat server
@@ -155,5 +151,8 @@ struct Args {
 fn main() {
     simple_logger::init().unwrap();
     let args = Args::parse(); 
-    start_server(&args.address, args.port);
+    if let Err(e) = start_server(&args.address, args.port) {
+        log::error!("{e}");
+        exit(1);
+    }
 }
