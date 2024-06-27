@@ -15,6 +15,7 @@ image = "0.25.1"
 log = "0.4.21"
 simple_logger = "5.0.0"
 anyhow = "1.0.86"
+tokio = { version = "1.38.0", features = ["macros", "rt-multi-thread", "fs", "net", "io-util", "sync"] }
 
 [lib]
 name = "chat"

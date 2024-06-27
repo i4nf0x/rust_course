@@ -1,6 +1,5 @@
-use std::io::{Read,Write};
-
 use serde::{Serialize, Deserialize};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{tcp::{OwnedReadHalf, OwnedWriteHalf}}};
 
 
 /// Represents a chat message which consists of a sender nickname and content
@@ -30,17 +29,17 @@ pub enum MessageError {
 
 impl ChatMessage {
 
-    pub fn read_from(stream: &mut dyn Read) -> Result<ChatMessage, MessageError> {
+    pub async fn read_from_stream(read_half: &mut OwnedReadHalf) -> Result<ChatMessage, MessageError> {
         let mut msg_len = [0u8; 4];
         
-        if stream.read_exact(&mut msg_len).is_err() {
+        if read_half.read_exact(&mut msg_len).await.is_err() {
             return Err(MessageError::IOError);
         }
 
         let msg_len = u32::from_le_bytes(msg_len);
 
         let mut buf: Vec<u8> = vec![0u8;msg_len as usize];
-        if stream.read_exact(&mut buf).is_err() {
+        if read_half.read_exact(&mut buf).await.is_err() {
             return Err(MessageError::IOError);
         }
 
@@ -56,15 +55,15 @@ impl ChatMessage {
         }
     }
 
-    pub fn write_to(&self, stream: &mut dyn Write) -> Result<(), MessageError> {
+    pub async fn write_to_stream(&self, stream: &mut OwnedWriteHalf) -> Result<(), MessageError> {
         match serde_cbor::to_vec(&self) {
             Ok(data) => {
                 let len = (data.len() as u32 ).to_le_bytes();
-                if stream.write(&len).is_err() {
+                if stream.write(&len).await.is_err() {
                     return Err(MessageError::IOError);
                 }
 
-                if stream.write_all(&data).is_err() {
+                if stream.write_all(&data).await.is_err() {
                     return Err(MessageError::IOError);
                 }
 

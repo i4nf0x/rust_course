@@ -1,10 +1,11 @@
 use std::ffi::OsStr;
-use std::io::{self, Cursor, Read, Write};
-use std::net::TcpStream;
+use std::io::{Cursor, Read, Write};
 use std::path::Path;
 use std::process::exit;
-use std::thread;
 use std::fs::File;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::TcpStream;
+
 
 use clap::Parser;
 use image::io::Reader as ImageReader;
@@ -23,9 +24,9 @@ pub enum ClientError {
 ///
 /// This function listens to the TCP socket and processes incoming messages
 /// 
-fn incoming_loop(mut stream: TcpStream) {
+async fn incoming_loop(mut read_half: OwnedReadHalf) {
     loop {
-        match ChatMessage::read_from(&mut stream) {
+        match ChatMessage::read_from_stream(&mut read_half).await {
             Ok(message) => {
                 let sender = message.sender;
                 match message.content {
@@ -103,9 +104,9 @@ fn basename(filename: &str) -> String {
 
 
 
-struct ChatContext<'a> {
-    stream: &'a mut TcpStream,
-    nickname: &'a str
+struct ChatContext {
+    write_half: OwnedWriteHalf,
+    nickname: String
 }
 
 enum UserCommand {
@@ -127,17 +128,17 @@ impl UserCommand {
         }
     }
 
-    fn perform(&self, context: &mut ChatContext) -> Result<bool> {
+    async fn perform(&self, context: &mut ChatContext) -> Result<bool> {
         match &self {
             Self::Text(text) => {
-                send_message(context, ChatMessageContent::Text(text.clone()))?;
+                send_message(context, ChatMessageContent::Text(text.clone())).await?;
                 Ok(false)
             },
             Self::Image(filename) => {
                 let data = read_image_data(filename)
                     .map_err(|e| ClientError::FileOperationFailed(e))?;
                 let content = ChatMessageContent::Image(data);
-                send_message(context, content)?;
+                send_message(context, content).await?;
                 println!("Image sent.");
                 Ok(false)
             },
@@ -145,7 +146,7 @@ impl UserCommand {
                 let data = read_file_data(filename)
                     .map_err(|e| ClientError::FileOperationFailed(e))?;
                 let content = ChatMessageContent::File(basename(filename), data);
-                send_message(context, content)?;
+                send_message(context, content).await?;
                 println!("File {} sent.", basename(filename));
                 Ok(false)
             },
@@ -159,7 +160,7 @@ impl UserCommand {
 
 
 /// This function continuously reads from stdin and processes user commands
-fn keyboard_loop(context: &mut ChatContext) -> EmptyResult {
+async fn keyboard_loop(context: &mut ChatContext) -> EmptyResult {
     println!("Ok, connected to server.");
     println!("Your name is {}", context.nickname);
     loop {
@@ -170,7 +171,7 @@ fn keyboard_loop(context: &mut ChatContext) -> EmptyResult {
         if len > 0 {
             let cmd = UserCommand::from_str(buf.trim());
 
-            match cmd.perform(context) {
+            match cmd.perform(context).await {
                 Err(e) =>  {
                     // if there was a problem with file handling, print it, otherwise terminate the loop
                     if matches!(e.downcast_ref::<ClientError>(), Some(ClientError::FileOperationFailed(_))) {
@@ -190,14 +191,15 @@ fn keyboard_loop(context: &mut ChatContext) -> EmptyResult {
     }
 }
 
-fn send_message(context: &mut ChatContext, content: ChatMessageContent) -> EmptyResult {
+async fn send_message(context: &mut ChatContext, content: ChatMessageContent) -> EmptyResult {
     let nickname = context.nickname.to_string();
     let message = ChatMessage {
         sender: nickname,
         content
     };
 
-    message.write_to(&mut context.stream).context("Failed to send a message.")?;
+    message.write_to_stream(&mut context.write_half).await
+        .context("Failed to send a message.")?;
     Ok(())
 }
 
@@ -237,15 +239,18 @@ fn read_file_data(filename: &str) -> Result<Vec<u8>> {
 /// 
 /// Two threads are spawned, the background thread that runs the incoming loop which
 /// processes incoming messages and the keyboard_loop which reads the keyboard input from the users
-fn start_client(address: &str, port: u16, nickname: &str) -> EmptyResult {
-    let mut stream = TcpStream::connect((address, port) )
+async fn start_client(address: &str, port: u16, nickname: String) -> EmptyResult {
+    let stream = TcpStream::connect((address, port) ).await
         .with_context(|| format!("Could not connect to {address}:{port}"))?;
     
-    let stream2 = stream.try_clone().context("Could not clone the stream.")?;
-    thread::spawn(move || incoming_loop(stream2));
-    let mut context = ChatContext{stream: &mut stream, nickname};
+    let (read_half, write_half) = stream.into_split();
     
-    return keyboard_loop(&mut context);
+    tokio::spawn(async move {
+        incoming_loop(read_half).await
+    });
+
+    let mut context = ChatContext{write_half, nickname};
+    return keyboard_loop(&mut context).await;
 }
 
 /// Simple chat client
@@ -263,10 +268,11 @@ struct Args {
     nickname: String
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = Args::parse();
 
-    if let Err(e) = start_client(&args.address, args.port, &args.nickname) {
+    if let Err(e) = start_client(&args.address, args.port, args.nickname).await {
         eprintln!("Error: {e}");
         exit(1);
     } else {

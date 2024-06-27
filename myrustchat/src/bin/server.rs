@@ -1,17 +1,21 @@
 use anyhow::{Result,Context};
-use std::collections::{HashMap};
+use tokio::net::tcp::OwnedWriteHalf;
+use std::collections::HashMap;
 
-use std::net::{TcpStream,SocketAddr,TcpListener};
+use tokio::net::{TcpStream,TcpListener};
+use std::net::SocketAddr;
 
 use std::process::exit;
-use std::sync::{Arc, Mutex};
-use std::thread;
 
 use clap::Parser;
 use log;
 
 use chat::ChatMessage;
 use chat::EmptyResult;
+use tokio;
+use tokio::sync::Mutex;
+use std::sync::Arc;
+
 
 
 #[derive(Debug,thiserror::Error)]
@@ -24,78 +28,74 @@ pub enum ServerError {
 
 #[derive(Clone)]
 struct ClientsTable {
-    pub table: Arc<Mutex<HashMap<SocketAddr, TcpStream>>>
+    pub table: Arc<Mutex<HashMap<SocketAddr, OwnedWriteHalf>>>
 }
 
 /// Represents a hash table that's shared among client threads
 impl ClientsTable {
     pub fn new() -> ClientsTable {
         ClientsTable {
-            table: Arc::new(Mutex::new(HashMap::<SocketAddr, TcpStream>::new()))
+            table: Arc::new(Mutex::new(HashMap::<SocketAddr, OwnedWriteHalf>::new()))
         }
     }
 
-    pub fn add_client(&mut self, addr: SocketAddr, stream: &TcpStream) -> EmptyResult {
-        let mut clients = self.table.lock()
-            .map_err(|_| ServerError::MutexPoisoned)?;
-        clients.insert(addr, stream.try_clone()?); 
+    pub async fn add_client(&mut self, addr: SocketAddr, write_half: OwnedWriteHalf) {
+        let mut clients = self.table.lock().await;
+        clients.insert(addr, write_half); 
         log::info!("Client {addr} connected.");
-        Ok(())
     }
 
-    pub fn remove_client(&mut self, addr: SocketAddr) -> EmptyResult {
-        let mut clients = self.table.lock()
-            .map_err(|_| ServerError::MutexPoisoned)?;
+    pub async fn remove_client(&mut self, addr: SocketAddr) {
+        let mut clients = self.table.lock().await;
         
         clients.remove(&addr); 
         log::info!("Client {addr} disconnected.");
-        Ok(())
     }
 
-    pub fn for_each<F: FnMut(&SocketAddr, &mut TcpStream) -> bool>(&mut self, callback: F) -> EmptyResult {
-        let mut clients = self.table.lock()
-            .map_err(|_| ServerError::MutexPoisoned)?;
-        clients.retain(callback);    
+    /// Broadcasts a chat message to all connected clients except the author.
+    pub async fn broadcast_message(&mut self, author: SocketAddr, message: &ChatMessage) -> EmptyResult {
+        let mut clients = self.table.lock().await;
+        let mut to_remove = vec![];
+
+        log::debug!("Broadcasting a message from {author}");
+
+        for (addr, write_half) in clients.iter_mut() {
+            if *addr == author {
+                continue;
+            }
+
+            log::debug!("Forwarding the message to {addr}.");
+
+            if let Err(_) = message.write_to_stream(write_half).await {
+                log::warn!("Write to client {addr} failed.");
+                to_remove.push(addr.clone());
+            }
+        }
+
+        for addr in to_remove {
+            clients.remove(&addr);
+        }
+
+
         Ok(())
     }
 }
 
 
-/// Broadcasts a chat message to all connected clients except the author.
-fn broadcast_message(author: SocketAddr, clients: &mut ClientsTable, message: &ChatMessage) -> EmptyResult {
-    log::debug!("Broadcasting a message from {author}");
-    clients.for_each(|addr, stream| {  
-        if *addr == author {
-            return true;
-        }
-
-        log::debug!("Forwarding the message to {addr}.");
-
-        if let Ok(_) = message.write_to(stream) {
-            true
-        } else {
-            log::warn!("Write to client {addr} failed.");
-            false
-        }
-    })?;
-
-    Ok(())
-}
 
 /// Receives messages from a client and broadcasts them to other clients.
-fn receive_messages(mut clients: ClientsTable, stream: Result<TcpStream, std::io::Error>)  -> EmptyResult {
-    let mut stream = stream.context("Failed to establish communication with a client.")?;
-    let addr = stream.peer_addr()?;
-    clients.add_client(addr, &stream)?;
+async fn receive_messages(mut clients: ClientsTable, stream: TcpStream, addr: SocketAddr)  -> EmptyResult {
+    let (mut read_half, write_half) = stream.into_split();
+    clients.add_client(addr, write_half).await;
 
     loop {
-        match ChatMessage::read_from(&mut stream) {
+        match ChatMessage::read_from_stream(&mut read_half).await {
             Ok(message) => { 
-                broadcast_message(addr, &mut clients, &message)?; 
+                clients.broadcast_message(addr, &message).await?; 
             }
             Err(chat::MessageError::IOError) => { 
-                clients.remove_client(addr)?;
-                Err(ServerError::BrokenStream)?; 
+                clients.remove_client(addr).await;
+                Err(ServerError::BrokenStream)?
             },
             Err(chat::MessageError::MalformedMessage) => { 
                 log::warn!("Received a malformed message from {addr}."); 
@@ -105,35 +105,42 @@ fn receive_messages(mut clients: ClientsTable, stream: Result<TcpStream, std::io
 }
 
 /// Handle incoming connection errors and pass control to receive_messages
-fn handle_client(clients: ClientsTable, stream: Result<TcpStream, std::io::Error>) {
-    log::info!("Client thread started.");
+async fn handle_client(clients: ClientsTable, client_info: Result<(TcpStream, SocketAddr), std::io::Error>) -> EmptyResult {
+    log::info!("Client task started.");
 
-    if let Err(e) = receive_messages(clients, stream) {
+    let (stream, address) = client_info
+        .context("Failed to establish communication with a client.")?;
+
+    if let Err(e) = receive_messages(clients, stream, address).await {
         if let Some(ServerError::BrokenStream) = e.downcast_ref::<ServerError>() {
             log::warn!("Connection with client terminated.");
             log::warn!("{e}");
         } else {
-            log::error!("{e}");
+            return Err(e);
         }
-        
     }
-    log::info!("Client thread terminated.");
+    
+    log::info!("Client task terminated.");
+    Ok(())
 }
 
 /// Main server function. Listens for incoming connections and spawns a new thread to handle each connection.
-fn start_server(address: &str, port: u16) -> EmptyResult {
-    let listener = TcpListener::bind((address, port))
+async fn start_server(address: &str, port: u16) -> EmptyResult {
+    let listener = TcpListener::bind((address, port)).await
         .with_context(|| format!("Could not bind {address}:{port}."))?;
 
     let clients = ClientsTable::new();
 
     log::info!("Ok: listening for connections on {address}:{port}");
-    for stream in listener.incoming() {
-        let clients = clients.clone();
-        thread::spawn(move || handle_client(clients, stream)) ;
+    loop {
+        let stream = listener.accept().await;
+        let clients  = clients.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_client(clients, stream).await {
+                log::error!("Client error: {e}");
+            }
+        });
     }
-
-    unreachable!();
 }
 
 /// Simple chat server
@@ -148,10 +155,11 @@ struct Args {
     port: u16,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     simple_logger::init().unwrap();
     let args = Args::parse(); 
-    if let Err(e) = start_server(&args.address, args.port) {
+    if let Err(e) = start_server(&args.address, args.port).await {
         log::error!("{e}");
         exit(1);
     }
