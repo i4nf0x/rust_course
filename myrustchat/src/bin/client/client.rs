@@ -11,14 +11,16 @@ use clap::Parser;
 use image::io::Reader as ImageReader;
 use anyhow::{Context, Error, Result};
 
-use chat::{ChatMessage, ChatMessageContent, EmptyResult};
+use chat::{ChatMessage, ChatMessageContent, Datagram, EmptyResult, ServerResponse};
 
 #[derive(Debug,thiserror::Error)]
 pub enum ClientError {
     #[error("File operation failed.")]
     FileOperationFailed(#[from] Error),
     #[error("Stream is broken")]
-    BrokenStream
+    BrokenStream,
+    #[error("Login failed")]
+    LoginFailed
 }
 
 ///
@@ -26,8 +28,8 @@ pub enum ClientError {
 /// 
 async fn incoming_loop(mut read_half: OwnedReadHalf) {
     loop {
-        match ChatMessage::read_from_stream(&mut read_half).await {
-            Ok(message) => {
+        match Datagram::read_from_stream(&mut read_half).await {
+            Ok(Datagram::Message(message)) => {
                 let sender = message.sender;
                 match message.content {
                     ChatMessageContent::Text(text) => {
@@ -47,10 +49,16 @@ async fn incoming_loop(mut read_half: OwnedReadHalf) {
                     }
                 }
             },
-            Err(chat::MessageError::MalformedMessage) => {
+            Ok(Datagram::ServerResponse(_)) => {
+                // we don't handle any server responses here
+            },
+            Ok(_) => {
+                eprintln!("Error: unexpected datagram");
+            }
+            Err(chat::ChatProtocolError::MalformedMessage) => {
                 eprintln!("Error: Malformed message received."); 
             },
-            Err(chat::MessageError::IOError) => {
+            Err(chat::ChatProtocolError::IOError) => {
                 eprintln!("Error: Connection with server broken.");
                 exit(1);
             }
@@ -106,7 +114,7 @@ fn basename(filename: &str) -> String {
 
 struct ChatContext {
     write_half: OwnedWriteHalf,
-    nickname: String
+    username: String
 }
 
 enum UserCommand {
@@ -162,7 +170,7 @@ impl UserCommand {
 /// This function continuously reads from stdin and processes user commands
 async fn keyboard_loop(context: &mut ChatContext) -> EmptyResult {
     println!("Ok, connected to server.");
-    println!("Your name is {}", context.nickname);
+    println!("Your name is {}", context.username);
     loop {
         let mut buf = String::new();
         let len = std::io::stdin().read_line(&mut buf)
@@ -192,13 +200,13 @@ async fn keyboard_loop(context: &mut ChatContext) -> EmptyResult {
 }
 
 async fn send_message(context: &mut ChatContext, content: ChatMessageContent) -> EmptyResult {
-    let nickname = context.nickname.to_string();
+    let nickname = context.username.to_string();
     let message = ChatMessage {
         sender: nickname,
         content
     };
 
-    message.write_to_stream(&mut context.write_half).await
+    Datagram::Message(message).write_to_stream(&mut context.write_half).await
         .context("Failed to send a message.")?;
     Ok(())
 }
@@ -239,18 +247,29 @@ fn read_file_data(filename: &str) -> Result<Vec<u8>> {
 /// 
 /// Two threads are spawned, the background thread that runs the incoming loop which
 /// processes incoming messages and the keyboard_loop which reads the keyboard input from the users
-async fn start_client(address: &str, port: u16, nickname: String) -> EmptyResult {
+async fn start_client(address: &str, port: u16, username: String, password: String) -> EmptyResult {
     let stream = TcpStream::connect((address, port) ).await
         .with_context(|| format!("Could not connect to {address}:{port}"))?;
-    
-    let (read_half, write_half) = stream.into_split();
-    
-    tokio::spawn(async move {
-        incoming_loop(read_half).await
-    });
+    let (mut read_half, mut write_half) = stream.into_split();
 
-    let mut context = ChatContext{write_half, nickname};
-    return keyboard_loop(&mut context).await;
+    //Authenticate
+    println!("Waiting for login...");
+    let login_datagram = Datagram::Login { username: username.clone(), password };
+    login_datagram.write_to_stream(&mut write_half).await?;
+
+    if let Datagram::ServerResponse(ServerResponse::LoginOk) = Datagram::read_from_stream(&mut read_half).await? {
+        println!("Login successful.");
+        tokio::spawn(async move {
+            incoming_loop(read_half).await
+        });
+    
+        let mut context = ChatContext{write_half, username};
+        return keyboard_loop(&mut context).await;
+    } else {
+        Err(ClientError::LoginFailed)?
+    }
+    
+    
 }
 
 /// Simple chat client
@@ -261,18 +280,21 @@ struct Args {
     #[arg(short,long,default_value = "127.0.0.1")]
     address: String,
     /// port of the server
-    #[arg(short,long, default_value_t = 11111)]
+    #[arg(short='P',long, default_value_t = 11111)]
     port: u16,
-    /// nickname for your messages
-    #[arg(short,default_value = "anonymous")]
-    nickname: String
+    /// your username
+    #[arg(short)]
+    username: String,
+    /// your password
+    #[arg(short='p')]
+    password: String
 }
 
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
 
-    if let Err(e) = start_client(&args.address, args.port, args.nickname).await {
+    if let Err(e) = start_client(&args.address, args.port, args.username, args.password).await {
         eprintln!("Error: {e}");
         exit(1);
     } else {

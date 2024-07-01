@@ -16,14 +16,17 @@ log = "0.4.21"
 simple_logger = "5.0.0"
 anyhow = "1.0.86"
 tokio = { version = "1.38.0", features = ["macros", "rt-multi-thread", "fs", "net", "io-util", "sync"] }
+sqlx = { version = "0.7.4", features = ["sqlite"] }
+rand = "0.8.5"
+argon2 = "0.5.3"
 
 [lib]
 name = "chat"
 
 [[bin]]
 name = "client"
-path = "src/bin/client.rs"
+path = "src/bin/client/client.rs"
 
 [[bin]]
 name = "server"
-path = "src/bin/server.rs"
+path = "src/bin/server/server.rs"
