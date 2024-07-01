@@ -12,13 +12,24 @@ use argon2::{
     Argon2
 };
 
+/// `ServerDatabase` struct represents the server's database with a connection to an SQLite database.
 pub struct ServerDatabase {
+    /// SQLite database connection
     pub db: SqliteConnection,
+    /// Optional salt string for password hashing
     password_salt: Option<SaltString>
 }
 
-
 impl ServerDatabase {
+    /// Creates a new instance of `ServerDatabase`.
+    ///
+    /// # Arguments
+    ///
+    /// * `file` - A string slice that holds the path to the database file.
+    ///
+    /// # Returns
+    ///
+    /// * `Result<ServerDatabase>` - Returns a result containing a `ServerDatabase` instance if successful.
     pub async fn new(file: &str) -> Result<ServerDatabase> {
         let connection = 
         SqliteConnection::connect(format!("sqlite:{file}?mode=rwc").as_str())
@@ -35,16 +46,20 @@ impl ServerDatabase {
         Ok(db)
     }
 
+    /// Initializes the database by creating necessary tables and setting up configurations.
+    ///
+    /// # Returns
+    ///
+    /// * `EmptyResult` - Returns an empty result if successful.
     async fn init(&mut self) -> EmptyResult {
         let (ver, ): (i32, ) = sqlx::query_as("PRAGMA user_version")
             .fetch_one(&mut self.db).await?;
         
-        if ver==0 {
+        if ver == 0 {
             log::warn!("Creating a new database.");
 
             let mut trans = self.db.begin().await?;
             
-
             sqlx::query(
                 "
                 CREATE TABLE IF NOT EXISTS users (
@@ -79,7 +94,6 @@ impl ServerDatabase {
                 ").execute(&mut *trans).await
                 .context("Failed to create table: config")?;
 
-            
             let salt = SaltString::generate(&mut OsRng);
             log::info!("Generated password salt: {salt}");
 
@@ -105,6 +119,16 @@ impl ServerDatabase {
         Ok(())
     }
 
+    /// Checks user authentication by verifying the password.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - A string slice that holds the username.
+    /// * `password` - A string slice that holds the password.
+    ///
+    /// # Returns
+    ///
+    /// * `Result<bool>` - Returns a result containing a boolean indicating if authentication was successful.
     pub async fn check_auth(&mut self, username: &str, password: &str) -> Result<bool> {
         let argon = Argon2::default();
         let hash: Option<String> = sqlx::query_scalar(
@@ -125,6 +149,16 @@ impl ServerDatabase {
         }
     }
 
+    /// Registers a new user with a username and password.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - A string slice that holds the username.
+    /// * `password` - A string slice that holds the password.
+    ///
+    /// # Returns
+    ///
+    /// * `EmptyResult` - Returns an empty result if successful.
     pub async fn register_user(&mut self, username: &str, password: &str) -> EmptyResult {
         let argon = Argon2::default();
         let password_salt = self.password_salt.as_ref()
@@ -145,10 +179,17 @@ impl ServerDatabase {
         } else {
             Err(anyhow!("Failed to hash password."))
         }
-
-        
     }
 
+    /// Stores a chat message in the database.
+    ///
+    /// # Arguments
+    ///
+    /// * `message` - A reference to a `ChatMessage` containing the message details.
+    ///
+    /// # Returns
+    ///
+    /// * `EmptyResult` - Returns an empty result if successful.
     pub async fn store_message(&mut self, message: &ChatMessage) -> EmptyResult {
 
         match &message.content {
@@ -187,5 +228,27 @@ impl ServerDatabase {
         }
         Ok(())
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use crate::ServerDatabase;
+
+    #[tokio::test]
+    async fn test_registration_and_login() {
+        let dbfile = tempfile::tempdir().unwrap().into_path().join("test.db");
+        let dbfile = dbfile.as_os_str().to_str().unwrap();
+        
+        let server_database = ServerDatabase::new(dbfile).await;
+        assert!(server_database.is_ok());
+        let mut server_database = server_database.unwrap();
+        assert!(server_database.register_user("Alice", "aaa").await.is_ok());
+        assert!(server_database.register_user("Bob", "bbb").await.is_ok());
+
+
+        assert!(matches!(server_database.check_auth("Alice", "aaa").await, Ok(true)));
+        assert!(matches!(server_database.check_auth("Alice", "bbb").await, Ok(false)));
+        assert!(matches!(server_database.check_auth("Catie", "aaa").await, Err(_)));
+    }
+    
 }

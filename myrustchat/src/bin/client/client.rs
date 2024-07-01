@@ -6,14 +6,14 @@ use std::fs::File;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
-
 use clap::Parser;
 use image::io::Reader as ImageReader;
 use anyhow::{Context, Error, Result};
 
 use chat::{ChatMessage, ChatMessageContent, Datagram, EmptyResult, ServerResponse};
 
-#[derive(Debug,thiserror::Error)]
+/// Enum representing different types of client errors.
+#[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("File operation failed.")]
     FileOperationFailed(#[from] Error),
@@ -23,9 +23,11 @@ pub enum ClientError {
     LoginFailed
 }
 
+/// Listens to the TCP socket and processes incoming messages.
 ///
-/// This function listens to the TCP socket and processes incoming messages
-/// 
+/// # Arguments
+///
+/// * `read_half` - The readable half of the TCP stream.
 async fn incoming_loop(mut read_half: OwnedReadHalf) {
     loop {
         match Datagram::read_from_stream(&mut read_half).await {
@@ -50,7 +52,7 @@ async fn incoming_loop(mut read_half: OwnedReadHalf) {
                 }
             },
             Ok(Datagram::ServerResponse(_)) => {
-                // we don't handle any server responses here
+                // We don't handle any server responses here
             },
             Ok(_) => {
                 eprintln!("Error: unexpected datagram");
@@ -66,6 +68,17 @@ async fn incoming_loop(mut read_half: OwnedReadHalf) {
     }
 }
 
+/// Handles incoming file and saves it to the specified directory.
+///
+/// # Arguments
+///
+/// * `dir_path` - The directory path where the file will be saved.
+/// * `data` - The file data.
+/// * `filename` - The optional filename.
+///
+/// # Returns
+///
+/// * `Option<String>` - Returns the saved filename if successful.
 fn handle_incoming_file(dir_path: &str, data: Vec<u8>, filename: Option<String>) -> Option<String> {
     match save_received_file(dir_path, data, filename) {
         Ok(filename) => {
@@ -79,14 +92,25 @@ fn handle_incoming_file(dir_path: &str, data: Vec<u8>, filename: Option<String>)
     }
 }
 
+/// Saves the received file to the specified directory.
+///
+/// # Arguments
+///
+/// * `dir_path` - The directory path where the file will be saved.
+/// * `data` - The file data.
+/// * `filename` - The optional filename.
+///
+/// # Returns
+///
+/// * `Result<String>` - Returns the saved filename if successful.
 fn save_received_file(dir_path: &str, data: Vec<u8>, filename: Option<String>) -> Result<String> {
     let dir_path = Path::new(dir_path);
     if !dir_path.exists() {
         std::fs::create_dir_all(dir_path)
-            .with_context(||format!("Error: Failed to create directory: {:?}", dir_path))?;       
+            .with_context(|| format!("Error: Failed to create directory: {:?}", dir_path))?;       
     }
     
-    let filename = basename(filename.unwrap_or(generate_timestamp("png")).as_str() );
+    let filename = basename(filename.unwrap_or(generate_timestamp("png")).as_str());
     let filepath = Path::join(dir_path, filename);
 
     let mut file = File::create(&filepath)
@@ -97,11 +121,29 @@ fn save_received_file(dir_path: &str, data: Vec<u8>, filename: Option<String>) -
     Ok(filepath.to_string_lossy().to_string())
 }
 
+/// Generates a timestamped filename with the specified extension.
+///
+/// # Arguments
+///
+/// * `file_ext` - The file extension.
+///
+/// # Returns
+///
+/// * `String` - Returns the generated filename.
 fn generate_timestamp(file_ext: &str) -> String {
     let time = chrono::Local::now();
-    time.format("%Y-%m-%d-%H:%M:%S.").to_string()+file_ext
+    time.format("%Y-%m-%d-%H:%M:%S.").to_string() + file_ext
 }
 
+/// Extracts the basename from the given filename.
+///
+/// # Arguments
+///
+/// * `filename` - The full filename.
+///
+/// # Returns
+///
+/// * `String` - Returns the basename of the filename.
 fn basename(filename: &str) -> String {
     let default_fn = "unknown.bin";
     Path::new(filename).file_name()
@@ -109,33 +151,51 @@ fn basename(filename: &str) -> String {
                 .to_str().unwrap_or(default_fn).to_string()
 }
 
-
-
-
+/// Represents the chat context holding the writable half of the TCP stream and the username.
 struct ChatContext {
     write_half: OwnedWriteHalf,
-    username: String
+    username: String,
 }
 
+/// Enum representing different user commands.
+#[derive(PartialEq)]
 enum UserCommand {
     Text(String),
     File(String),
     Image(String),
-    Quit
+    Quit,
 }
 
 impl UserCommand {
+    /// Parses a command string into a `UserCommand`.
+    ///
+    /// # Arguments
+    ///
+    /// * `line` - The command string.
+    ///
+    /// # Returns
+    ///
+    /// * `UserCommand` - Returns the parsed user command.
     fn from_str(line: &str) -> UserCommand {
-        let line_sep = line.to_string()+" ";
+        let line_sep = line.to_string() + " ";
         let command = line_sep.split_once(' ');
         match command {
-            Some((".quit","")) => Self::Quit,
+            Some((".quit", "")) => Self::Quit,
             Some((".file", filename)) => Self::File(filename.trim().to_string()),
             Some((".image", filename)) => Self::Image(filename.trim().to_string()),
             _ => Self::Text(line.to_string())
         }
     }
 
+    /// Performs a user command.
+    ///
+    /// # Arguments
+    ///
+    /// * `context` - The chat context.
+    ///
+    /// # Returns
+    ///
+    /// * `Result<bool>` - Returns `true` if the command indicates to quit, otherwise `false`.
     async fn perform(&self, context: &mut ChatContext) -> Result<bool> {
         match &self {
             Self::Text(text) => {
@@ -166,8 +226,15 @@ impl UserCommand {
     }
 }
 
-
-/// This function continuously reads from stdin and processes user commands
+/// Continuously reads from stdin and processes user commands.
+///
+/// # Arguments
+///
+/// * `context` - The chat context.
+///
+/// # Returns
+///
+/// * `EmptyResult` - Returns an empty result if successful.
 async fn keyboard_loop(context: &mut ChatContext) -> EmptyResult {
     println!("Ok, connected to server.");
     println!("Your name is {}", context.username);
@@ -180,10 +247,9 @@ async fn keyboard_loop(context: &mut ChatContext) -> EmptyResult {
             let cmd = UserCommand::from_str(buf.trim());
 
             match cmd.perform(context).await {
-                Err(e) =>  {
-                    // if there was a problem with file handling, print it, otherwise terminate the loop
+                Err(e) => {
+                    // If there was a problem with file handling, print it, otherwise terminate the loop
                     if matches!(e.downcast_ref::<ClientError>(), Some(ClientError::FileOperationFailed(_))) {
-                        
                         eprintln!("Error: {e}"); 
                         eprint!("{}", e.root_cause());
                     } else {
@@ -191,19 +257,29 @@ async fn keyboard_loop(context: &mut ChatContext) -> EmptyResult {
                     }
                 },
                 Ok(true) => return Ok(()), // exit
-                _ => ()
+                _ => (),
             }
         } else {
-            return Ok(()) // end of input, exit
+            return Ok(()); // end of input, exit
         }
     }
 }
 
+/// Sends a chat message.
+///
+/// # Arguments
+///
+/// * `context` - The chat context.
+/// * `content` - The content of the chat message.
+///
+/// # Returns
+///
+/// * `EmptyResult` - Returns an empty result if successful.
 async fn send_message(context: &mut ChatContext, content: ChatMessageContent) -> EmptyResult {
     let nickname = context.username.to_string();
     let message = ChatMessage {
         sender: nickname,
-        content
+        content,
     };
 
     Datagram::Message(message).write_to_stream(&mut context.write_half).await
@@ -211,11 +287,19 @@ async fn send_message(context: &mut ChatContext, content: ChatMessageContent) ->
     Ok(())
 }
 
-
+/// Reads image data from a file. The file is converted to PNG if needed.
+///
+/// # Arguments
+///
+/// * `filename` - The name of the file.
+///
+/// # Returns
+///
+/// * `Result<Vec<u8>>` - Returns the image data if successful.
 fn read_image_data(filename: &str) -> Result<Vec<u8>> {
     let extension = Path::new(filename).extension().and_then(OsStr::to_str);
     match extension {
-        Some(".png") | Some(".PNG") => {
+        Some("png") | Some("PNG") => {
             read_file_data(filename)
         },
         _ => {
@@ -231,6 +315,15 @@ fn read_image_data(filename: &str) -> Result<Vec<u8>> {
     }
 }
 
+/// Reads file data to a vector.
+///
+/// # Arguments
+///
+/// * `filename` - The name of the file.
+///
+/// # Returns
+///
+/// * `Result<Vec<u8>>` - Returns the file data if successful.
 fn read_file_data(filename: &str) -> Result<Vec<u8>> {
     let mut file = File::open(filename)
         .with_context(|| format!("Could not open file {filename}."))?;
@@ -240,19 +333,25 @@ fn read_file_data(filename: &str) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-
-
-/// Main function of the client. Connects to the server and starts the keyboard_loop 
+/// Main function of the client. Connects to the server and starts the keyboard loop
 /// which reads text commands.
-/// 
-/// Two threads are spawned, the background thread that runs the incoming loop which
-/// processes incoming messages and the keyboard_loop which reads the keyboard input from the users
+///
+/// # Arguments
+///
+/// * `address` - The address of the server.
+/// * `port` - The port of the server.
+/// * `username` - The username of the client.
+/// * `password` - The password of the client.
+///
+/// # Returns
+///
+/// * `EmptyResult` - Returns an empty result if successful.
 async fn start_client(address: &str, port: u16, username: String, password: String) -> EmptyResult {
-    let stream = TcpStream::connect((address, port) ).await
+    let stream = TcpStream::connect((address, port)).await
         .with_context(|| format!("Could not connect to {address}:{port}"))?;
     let (mut read_half, mut write_half) = stream.into_split();
 
-    //Authenticate
+    // Authenticate
     println!("Waiting for login...");
     let login_datagram = Datagram::Login { username: username.clone(), password };
     login_datagram.write_to_stream(&mut write_half).await?;
@@ -263,31 +362,29 @@ async fn start_client(address: &str, port: u16, username: String, password: Stri
             incoming_loop(read_half).await
         });
     
-        let mut context = ChatContext{write_half, username};
+        let mut context = ChatContext { write_half, username };
         return keyboard_loop(&mut context).await;
     } else {
         Err(ClientError::LoginFailed)?
     }
-    
-    
 }
 
-/// Simple chat client
-#[derive(Parser,Debug)]
+/// Simple chat client.
+#[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// address of the server
-    #[arg(short,long,default_value = "127.0.0.1")]
+    /// Address of the server
+    #[arg(short, long, default_value = "127.0.0.1")]
     address: String,
-    /// port of the server
-    #[arg(short='P',long, default_value_t = 11111)]
+    /// Port of the server
+    #[arg(short = 'P', long, default_value_t = 11111)]
     port: u16,
-    /// your username
+    /// Your username
     #[arg(short)]
     username: String,
-    /// your password
-    #[arg(short='p')]
-    password: String
+    /// Your password
+    #[arg(short = 'p')]
+    password: String,
 }
 
 #[tokio::main]
@@ -300,5 +397,32 @@ async fn main() {
     } else {
         exit(0);
     }
-    
 }
+
+#[cfg(test)]
+mod tests {
+
+    use crate::{basename, UserCommand};
+
+    #[test]
+    fn test_basename() {
+        let z = basename("a/b/c.txt");
+        assert_eq!(z, "c.txt");
+    }
+
+    #[test]
+    fn test_user_command_from_str() {
+        assert!(matches!(UserCommand::from_str("this is a text"), UserCommand::Text(_)));
+        
+        let file_command = UserCommand::File("test.txt".to_string());
+        assert!(UserCommand::from_str(".file test.txt")==file_command);
+
+        let image_command = UserCommand::Image("test.jpg".to_string());
+        assert!(UserCommand::from_str(".image test.jpg")==image_command);
+
+        assert!(matches!(UserCommand::from_str(".quit  "), UserCommand::Text(_)));
+        
+        assert!(matches!(UserCommand::from_str(".quit"), UserCommand::Quit));
+    }
+}
+

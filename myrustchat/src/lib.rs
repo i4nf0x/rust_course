@@ -1,4 +1,4 @@
-pub mod chat_message;
-pub use chat_message::*;
+pub mod datagram;
+pub use datagram::*;
 
 pub type EmptyResult = anyhow::Result<()>;

@@ -19,6 +19,7 @@ tokio = { version = "1.38.0", features = ["macros", "rt-multi-thread", "fs", "ne
 sqlx = { version = "0.7.4", features = ["sqlite"] }
 rand = "0.8.5"
 argon2 = "0.5.3"
+tempfile = "3.10.1"
 
 [lib]
 name = "chat"
